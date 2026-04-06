@@ -1,84 +1,76 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
-FastAPI application for the Agentic Security Lab Environment.
-
-This module creates an HTTP server that exposes the AgenticSecurityLabEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
-
-Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
-
-Usage:
-    # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
-
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-    # Or run directly:
-    python -m server.app
+FastAPI server — replace the contents of:
+    agentic_security_lab/server/app.py
 """
+import os
+from fastapi import FastAPI
+from pydantic import BaseModel
 
-try:
-    from openenv.core.env_server.http_server import create_app
-except Exception as e:  # pragma: no cover
-    raise ImportError(
-        "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
-    ) from e
-
-try:
-    from ..models import AgenticSecurityLabAction, AgenticSecurityLabObservation
-    from .agentic_security_lab_environment import AgenticSecurityLabEnvironment
-except ModuleNotFoundError:
-    from models import AgenticSecurityLabAction, AgenticSecurityLabObservation
-    from server.agentic_security_lab_environment import AgenticSecurityLabEnvironment
-
-
-# Create the app with web interface and README integration
-app = create_app(
-    AgenticSecurityLabEnvironment,
+from models import (
     AgenticSecurityLabAction,
     AgenticSecurityLabObservation,
-    env_name="agentic_security_lab",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    AgenticSecurityLabState,
+)
+from server.agentic_security_lab_environment import AgenticSecurityLabEnvironment
+
+TASK_NAME = os.getenv("TASK_NAME", "easy")
+
+env = AgenticSecurityLabEnvironment(task_name=TASK_NAME)
+
+app = FastAPI(
+    title="Agentic Security Lab — Supply Chain Incident Response",
+    description=(
+        "OpenEnv RL environment: respond to a live supply-chain attack. "
+        "Quarantine malicious packages, rotate secrets, notify teams — "
+        "before the attacker exfiltrates credentials."
+    ),
+    version="1.0.0",
 )
 
 
+class ResetRequest(BaseModel):
+    task_name: str | None = None
+
+
+class StepRequest(BaseModel):
+    command: str
+    parameters: dict = {}
+
+
+@app.post("/reset", response_model=AgenticSecurityLabObservation)
+def reset(req: ResetRequest = ResetRequest()):
+    return env.reset(task_name=req.task_name)
+
+
+@app.post("/step", response_model=AgenticSecurityLabObservation)
+def step(req: StepRequest):
+    action = AgenticSecurityLabAction(command=req.command, parameters=req.parameters)
+    return env.step(action)
+
+
+@app.get("/state", response_model=AgenticSecurityLabState)
+def state():
+    return env.state
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "task": env.state.task_name}
+
+@app.get("/")
+def root():
+    return {
+        "name": "agentic-security-lab",
+        "version": "1.0.0",
+        "tasks": ["easy", "medium", "hard"],
+        "endpoints": ["/reset", "/step", "/state", "/health"],
+    }
+
+
 def main(host: str = "0.0.0.0", port: int = 8000):
-    """
-    Entry point for direct execution via uv run or python -m.
-
-    This function enables running the server without Docker:
-        uv run --project . server
-        uv run --project . server --port 8001
-        python -m agentic_security_lab.server.app
-
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
-
-    For production deployments, consider using uvicorn directly with
-    multiple workers:
-        uvicorn agentic_security_lab.server.app:app --workers 4
-    """
     import uvicorn
-
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()
