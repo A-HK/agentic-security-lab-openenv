@@ -218,11 +218,10 @@ def train_policy(
         model=model,
         args=args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         peft_config=lora_config,
-        dataset_text_field="text",
-        max_seq_length=1024,
     )
+
     trainer.train()
     trainer.save_model(output_dir)
 
