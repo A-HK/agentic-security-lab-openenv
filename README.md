@@ -1,6 +1,6 @@
 ---
 title: Agentic Security Lab Environment Server
-emoji: 🚨
+emoji: "🚨"
 colorFrom: red
 colorTo: purple
 sdk: docker
@@ -16,61 +16,49 @@ tags:
 
 # Agentic Security Lab: Supply Chain Incident Response
 
-Train and evaluate agents on a high-stakes, real-world workflow: **responding to a confirmed software supply chain compromise before attacker exfiltration succeeds**.
+Agentic Security Lab is an OpenEnv environment for training and evaluating agents on a high-stakes workflow: responding to a software supply-chain compromise before attacker exfiltration succeeds.
 
-When a dependency gets compromised, teams do not fail because they cannot detect one IOC. They fail because containment is a sequence problem: what to quarantine first, which secrets to rotate immediately, who to notify, and how to do it before the attacker cashes out.
+The benchmark is designed around three Round 2 themes:
 
-This environment models that exact pressure. The agent is not doing passive detection. It must **actively coordinate incident response** over multiple steps with changing state, incomplete information, and deadline pressure.
+- Theme #2: long-horizon planning under deadline pressure
+- Theme #3: world modeling in a partially observable professional workflow
+- Theme #4: self-improvement through rollout collection, policy training, and world-model refresh
 
-## Recent Threat Context
+## Problem Framing
 
-This benchmark is grounded in publicly reported incident patterns teams are dealing with now:
+When a dependency is compromised, success is not just "spot one IOC." The hard part is sequencing the response:
 
-- **Axios npm compromise**: public postmortems and threat-intel writeups describe malicious Axios versions published from a compromised maintainer account, with downstream credential risk at scale. See [axios maintainer postmortem](http://github.com/axios/axios/issues/10636), [Microsoft analysis](https://www.microsoft.com/en-us/security/blog/2026/04/01/mitigating-the-axios-npm-supply-chain-compromise/), and [Endor Labs report](https://www.endorlabs.com/learn/npm-axios-compromise).
-- **LiteLLM PyPI compromise**: maintainers and advisories documented malicious LiteLLM releases tied to credential theft behavior and urgent secret rotation guidance. See [LiteLLM incident thread](https://github.com/BerriAI/litellm/issues/24518), [LiteLLM security update](https://docs.litellm.ai/blog/security-update-march-2026), and [GitLab advisory](https://advisories.gitlab.com/pkg/pypi/litellm/GHSA-5mg7-485q-xm76/).
-- **PhantomRaven-style npm campaigns**: large multi-package credential theft operations emphasize how attackers blend slopsquatting, token theft, and CI/CD secret exfiltration. See [Sonatype coverage](https://www.sonatype.com/blog/phantomraven-npm-malware) and [OSSF malicious-packages tracking](https://github.com/ossf/malicious-packages/issues/1166).
+- inspect suspicious packages,
+- trace blast radius through dependency graphs,
+- quarantine the right package versions,
+- rotate the right secrets in the right order,
+- notify downstream teams before the attacker cashes out.
 
-Agentic Security Lab operationalizes these patterns into deterministic tasks where action ordering directly changes containment outcomes.
+That is the behavior this environment scores.
 
-## Why This Environment Matters
+## Threat Context
 
-Most current agent benchmarks reward short, stateless tasks. Real security operations are not like that.
+This benchmark is inspired by recent public incident patterns:
 
-This environment models:
-- dependency-graph blast radius analysis,
-- package quarantine decisions under uncertainty,
-- secret rotation prioritization (critical vs non-critical),
-- downstream stakeholder notification at scale,
-- race-against-the-clock containment before exfiltration.
+- Axios npm compromise and downstream credential risk
+- LiteLLM PyPI compromise and urgent secret rotation guidance
+- PhantomRaven-style npm campaigns using slopsquatting and CI/CD token theft
 
-The result is an RL-friendly setting with meaningful sequential decision-making and deterministic grading.
+The environment itself is deterministic in `benchmark` mode and self-contained; the threat references motivate the task design, but scoring does not depend on external services.
 
 ## Scenario Design
 
-Three deterministic tasks with increasing difficulty:
+Three fixed tasks are included:
 
-### Easy
-- Single compromised package: `axios@1.7.4`
-- 2 exposed secrets
-- 3 affected teams
-- Exfiltration deadline: 14 steps
+- `easy`: one malicious package, two secrets, three downstream teams
+- `medium`: transitive compromise via `form-data@4.0.1`, five secrets, twelve teams
+- `hard`: five malicious packages, eight secrets, twenty teams, tight exfiltration window
 
-### Medium
-- Transitive compromise: `form-data@4.0.1` (via `node-fetch`)
-- 5 exposed secrets
-- 12 affected teams
-- Exfiltration deadline: 18 steps
+Each task uses the same action interface but increases horizon length, blast radius, and coordination load.
 
-### Hard
-- Coordinated PhantomRaven-style campaign
-- 5 malicious packages (slopsquatting)
-- 8 secrets including CI/CD credentials
-- 20 affected teams
-- Exfiltration deadline: 10 steps
+## API Contract
 
-## Action Space
-
-Actions are structured commands:
+### Actions
 
 - `inspect_package` with `{"package": "<name@version>"}`
 - `check_dependents` with `{"package": "<name@version>"}`
@@ -80,159 +68,117 @@ Actions are structured commands:
 - `scan_logs` with `{"package": "<name@version>"}`
 - `conclude` with `{}`
 
-## Observation Space
+### Reset Options
+
+`POST /reset` supports:
+
+- `task_name`
+- `mode=benchmark|training`
+- `command_fallback_enabled=true|false`
+
+Invalid mode values fall back to `benchmark` and the fallback is reported in state and evaluator telemetry.
+
+### Observation Fields
 
 Each step returns:
 
-- `success`: whether the action executed correctly
-- `done`: episode termination flag
-- `reward`: per-step shaped reward
-- `result`: human-readable action result
-- `data`: structured output for machine consumption
-- `incident_summary`: compact progress dashboard
-- `steps_remaining`: countdown to attacker success threshold
-- `exposed_secrets`: not-yet-rotated credentials
-- `active_malicious_packages`: malicious packages not yet quarantined
-- `error`: optional action error reason
+- `reward`: dense training reward for the current action
+- `data.benchmark_score`: deterministic evaluator score in `[0, 1]`
+- `data.score_breakdown`: `quarantine_ratio`, `rotate_ratio`, `notify_ratio`, `contain_ratio`
+- `data.evaluator_metrics`: invalid actions, false positives, mode fallback, command fallback count, deadline status
+- `active_malicious_packages`: confirmed malicious packages not yet quarantined
+- `exposed_secrets`: discovered secrets not yet rotated
 
-The `data` field includes evaluator-facing telemetry:
-- `reward_type`: always `training_step_reward`
-- `benchmark_score`: deterministic task score computed from current state
-- `score_breakdown`: component ratios (`quarantine`, `rotate`, `notify`, `contain`)
-- `evaluator_metrics`: audit-friendly counts (invalid actions, fallback use, false positives, deadline status)
+The environment no longer leaks all malicious packages or secrets at reset. Discovery must come from package inspection, log scans, and dependency tracing.
 
-## Reward Design
+## Deterministic Grading
 
-Dense reward shaping provides trajectory-level signal, not just terminal binary success.
-
-Per-step rewards:
-- quarantine correct malicious package: `+0.15`
-- rotate critical secret: `+0.12`
-- rotate non-critical secret: `+0.06`
-- notify affected team: `+0.04`
-- scan logs for intel: `+0.02`
-- inspect/check dependency metadata: `+0.01`
-
-Penalties:
-- quarantine clean package (false positive): `-0.05`
-- re-rotate already rotated secret: `-0.02`
-- invalid/unknown command: `-0.01`
-
-Episode-end bonuses (on `conclude`/terminal):
-- all required packages quarantined: `+0.10`
-- all required secrets rotated: `+0.10`
-- all required teams notified: `+0.05`
-- contained before exfiltration: `+0.10`
-- attacker succeeds: `-0.20`
-
-## Mode and Fallback Architecture
-
-The environment supports explicit execution modes and safe fallbacks:
-
-- `mode=benchmark` (default): deterministic evaluation behavior for leaderboard runs.
-- `mode=training`: same state transitions with evaluator telemetry preserved for training analysis.
-- Unsupported mode values safely fallback to `benchmark`, and `mode_fallback_used=true` is exposed in `state` and `data.evaluator_metrics`.
-
-Command fallback can be enabled for robustness:
-- aliases like `inspect`, `deps`, `dependents`, `rotate` map to canonical commands.
-- fallback usage is counted in `command_fallback_used_count`.
-
-You can set defaults via environment variables:
-- `AGENTIC_SECURITY_LAB_MODE=benchmark|training`
-- `AGENTIC_SECURITY_LAB_COMMAND_FALLBACK=true|false`
-
-Or override at runtime via `POST /reset` body:
-- `mode`
-- `command_fallback_enabled`
-
-## Training Reward vs Benchmark Score
-
-The environment now separates learning signal from benchmark evaluation:
-
-- `reward` (per-step): **training reward** used for RL trajectories.
-- `benchmark_score` (in `observation.data`): deterministic score for evaluator reporting.
-
-This makes it clear that reward shaping drives behavior during episodes, while benchmark score reflects objective completion quality.
-
-## Grader Definition (Deterministic)
-
-Task-level grading is deterministic and normalized to `[0, 1]` using explicit component completion ratios from final `state`.
-
-For each task (`easy`, `medium`, `hard`), required sets are fixed:
-- required malicious packages to quarantine,
-- required secrets to rotate,
-- required teams to notify.
-
-Component ratios:
-- `quarantine_ratio = |quarantined ∩ required_quarantine| / |required_quarantine|`
-- `rotate_ratio = |rotated_secrets ∩ required_rotate_secret| / |required_rotate_secret|`
-- `notify_ratio = |notified_teams ∩ required_notify| / |required_notify|`
-- `contain_ratio = 1.0 if attacker_succeeded == false else 0.0`
-
-Final score:
+The benchmark score is computed from the current state:
 
 `score = 0.35 * quarantine_ratio + 0.35 * rotate_ratio + 0.20 * notify_ratio + 0.10 * contain_ratio`
 
 Implementation details:
-- score is clamped to `[0, 1]`,
-- score is rounded to 6 decimals,
-- same state always yields the same score (no randomness).
 
-Worked example (`medium`):
-- required: `1` quarantine, `5` secret rotations, `12` notifications
-- achieved: `1` quarantine, `4` secret rotations, `9` notifications
-- attacker did **not** succeed
+- `quarantine_ratio` = required malicious packages quarantined / total required malicious packages
+- `rotate_ratio` = required secrets rotated / total required secrets
+- `notify_ratio` = required teams notified / total required teams
+- `contain_ratio` = `1.0` only when all required malicious packages are contained and the attacker has not succeeded
+- score is clamped to `[0, 1]` and rounded to 6 decimals
 
-Then:
-- `quarantine_ratio = 1/1 = 1.00`
-- `rotate_ratio = 4/5 = 0.80`
-- `notify_ratio = 9/12 = 0.75`
-- `contain_ratio = 1.00`
+This score is separate from the dense per-step training reward.
 
-`score = 0.35*(1.00) + 0.35*(0.80) + 0.20*(0.75) + 0.10*(1.00) = 0.88`
+## Reward Design
+
+Dense reward shaping is preserved for rollout learning:
+
+- correct malicious package quarantine: `+0.15`
+- rotate critical secret: `+0.12`
+- rotate non-critical secret: `+0.06`
+- notify affected team: `+0.04`
+- scan logs: `+0.02`
+- inspect/check dependency metadata: `+0.01`
+
+Penalties:
+
+- false-positive quarantine: `-0.05`
+- re-rotate an already rotated secret: `-0.02`
+- invalid target or unknown command: `-0.01`
+- immediate or low-progress conclude: negative reward instead of a free bonus
+
+## Planner, World Model, and Training
+
+The repo now includes:
+
+- `planning/`: plan memory, goal progression, and replanning logic
+- `world_model/`: transition-conditioned action ranking model trained from collected rollouts
+- `training/train_grpo.py`: live-environment rollout collection plus TRL-backed LoRA policy training
+- `training/self_improve.py`: repeated collect -> train -> rebuild world model loop
+- `notebooks/round2_training_colab.ipynb`: Colab notebook that installs deps, starts the server, trains, evaluates, and exports plots
 
 ## Quick Start
 
-### 1) Install dependencies
+### Install
 
 ```bash
 pip install -U openenv-core
+pip install -e .
 ```
 
-### 2) Run locally
+For training:
+
+```bash
+pip install -e .[train]
+```
+
+### Run the Environment
 
 ```bash
 uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3) Interact with API
+### Smoke Test
 
 ```bash
-# Reset to hard task
 curl -X POST http://localhost:8000/reset \
   -H "Content-Type: application/json" \
-  -d '{"task_name":"hard"}'
-
-# Step: inspect a suspicious package
-curl -X POST http://localhost:8000/step \
-  -H "Content-Type: application/json" \
-  -d '{"command":"inspect_package","parameters":{"package":"1odash@4.17.21"}}'
+  -d '{"task_name":"hard","mode":"benchmark"}'
 ```
 
 ## Baseline Inference
 
-`inference.py` runs a model through tasks and prints structured logs in hackathon format:
+`inference.py` emits only the required hackathon log lines:
 
 - `[START]`
 - `[STEP]`
 - `[END]`
 
+It uses `benchmark_score` for final scoring instead of summing shaped rewards.
+
 Required environment variables:
-- `HF_TOKEN` (or compatible API key)
-- `API_BASE_URL` (optional override, defaults set in script)
-- `MODEL_NAME` (optional override)
-- `ENV_BASE_URL` (defaults to `http://localhost:8000`)
-- `TASK_NAME` (optional: `easy|medium|hard`; otherwise runs all tasks)
+
+- `HF_TOKEN` or compatible API key
+- `API_BASE_URL` and `MODEL_NAME` for model routing
+- `ENV_BASE_URL` for the environment server
 
 Run:
 
@@ -240,64 +186,120 @@ Run:
 python inference.py
 ```
 
-## OpenEnv + Submission Compliance
+## Training and Evaluation
 
-This project includes:
-- typed action/observation/state models (`models.py`),
-- `step` / `reset` / `state` endpoints (`server/app.py`),
-- environment metadata (`openenv.yaml`),
-- containerized runtime (`Dockerfile`),
-- baseline script (`inference.py`).
-
-Pre-submit checks:
+Collect trajectories and train a LoRA policy:
 
 ```bash
-# from repo root
-docker build -t agentic-security-lab .
-openenv validate
+python training/train_grpo.py \
+  --env-base-url http://localhost:8000 \
+  --task medium \
+  --episodes 12 \
+  --model-name Qwen/Qwen2.5-0.5B-Instruct \
+  --output-dir artifacts/checkpoints/policy
 ```
 
-If using the provided validator script:
+Train the world model from collected transitions:
+
+```bash
+python world_model/train_world_model.py \
+  --transitions artifacts/transitions.jsonl \
+  --output artifacts/world_model.json
+```
+
+Summarize and plot metrics:
+
+```bash
+python training/evaluate.py
+python training/plot_metrics.py
+```
+
+## Colab
+
+The notebook lives at [notebooks/round2_training_colab.ipynb](notebooks/round2_training_colab.ipynb) and keeps the existing file path so it can be linked directly from the submission.
+
+## Validation
+
+Run the local checks before submission:
+
+```bash
+openenv validate
+docker build -t agentic-security-lab .
+```
+
+For the provided validator:
 
 ```bash
 ./validate-submission.sh https://your-space.hf.space .
 ```
 
-## Deploy to Hugging Face Spaces
+## Artifacts
 
-From the environment directory:
+The repo expects the following generated artifacts:
 
-```bash
-openenv push --repo-id <username>/agentic-security-lab
-```
+- [artifacts/reward_curve.png](artifacts/reward_curve.png)
+- [artifacts/loss_curve.png](artifacts/loss_curve.png)
+- [artifacts/baseline_vs_trained.png](artifacts/baseline_vs_trained.png)
+- `artifacts/metrics.jsonl`
+- `artifacts/transitions.jsonl`
+- `artifacts/world_model.json`
 
-After deployment, verify:
-- `POST /reset` returns `200`
-- task switching works (`easy`, `medium`, `hard`)
-- inference runs end-to-end within runtime budget
+### Inline Plots
+
+![Reward Curve](artifacts/reward_curve.png)
+
+Reward collected across rollout episodes.
+
+![Loss Curve](artifacts/loss_curve.png)
+
+Training loss proxy logged during trajectory collection and policy tuning.
+
+![Baseline vs Trained](artifacts/baseline_vs_trained.png)
+
+Visual comparison plot used in the submission package.
+
+## Submission Links
+
+Fill these in before submitting:
+
+- Hugging Face Space: `<ADD_PUBLIC_SPACE_URL>`
+- Colab Notebook: [notebooks/round2_training_colab.ipynb](notebooks/round2_training_colab.ipynb)
+- Blog / video / slides: `<ADD_PUBLIC_WRITEUP_URL>`
 
 ## Project Structure
 
 ```text
 agentic_security_lab/
-├── README.md
-├── openenv.yaml
-├── inference.py
-├── models.py
-├── scenarios.py
-├── client.py
-├── pyproject.toml
-├── Dockerfile
-└── server/
-    ├── app.py
-    └── agentic_security_lab_environment.py
+|-- README.md
+|-- openenv.yaml
+|-- inference.py
+|-- models.py
+|-- scenarios.py
+|-- client.py
+|-- pyproject.toml
+|-- Dockerfile
+|-- planning/
+|-- training/
+|-- world_model/
+|-- notebooks/
+|-- artifacts/
+`-- server/
 ```
 
-## What Makes It Novel
+## Current Status
 
-- Security operations instead of toy game dynamics.
-- Realistic dependency-graph containment workflow.
-- Mixed objectives (containment, credential safety, communications) with competing priorities.
-- Deterministic scoring with partial credit over full trajectories.
+Implemented in code:
 
-This makes Agentic Security Lab useful for evaluating planning quality, action ordering, and risk-aware behavior in agentic systems.
+- validator-clean packaging
+- benchmark/training modes
+- fallback accounting
+- deterministic benchmark grading
+- hidden-state removal at reset
+- hackathon-format inference logging
+- TRL-backed policy-training entrypoint
+- Colab notebook path retained and updated
+
+Still user-supplied before final submission:
+
+- public HF Space URL
+- public writeup / video / slides link
